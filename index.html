@@ -1617,7 +1617,7 @@ GP.colName = colName;
 /* ===== ui-base.js — tiện ích giao diện, lưu trữ trên máy, tấm trượt, hộp thoại ===== */
 const GP = window.GP;
 const A = window.AndroidBridge || null;            // có khi chạy trong APK
-const APP_VER = '1.0.8';
+const APP_VER = '1.0.9';
 const $ = function (s, el) { return (el || document).querySelector(s); };
 const $$ = function (s, el) { return Array.from((el || document).querySelectorAll(s)); };
 
@@ -1764,9 +1764,12 @@ const S = {
   gen: new Map()
 };
 /* Quyền trên cây dùng chung: quản trị viên (chủ cây) và người cùng quản trị sửa được mọi thứ;
-   thành viên đã được duyệt chỉ xem, thêm người mới và gửi góp ý, không sửa được thông tin đã có */
+   thành viên đã được duyệt xem, thêm người mới, tự sửa / xóa người do chính mình thêm, còn lại chỉ gửi góp ý */
 function canEdit() { return !!S.tree && (!S.tree.cloud || ((S.tree.role === 'admin' || S.tree.role === 'editor') && typeof Cloud !== 'undefined' && Cloud.live(S.tree.id))); }
 function canAdd() { return canEdit() || (!!S.tree && !!S.tree.cloud && S.tree.role === 'viewer' && typeof Cloud !== 'undefined' && Cloud.live(S.tree.id) && !!(Cloud.cur && Cloud.cur.member)); }
+/* người do chính mình thêm vào cây (thành viên sửa, xóa được người của mình) */
+function isMine(p) { return !!p && !!p.by && !!S.tree && !!S.tree.cloud && typeof Cloud !== 'undefined' && !!Cloud.user && p.by === Cloud.user.uid; }
+function canEditPerson(p) { return canEdit() || (canAdd() && isMine(p)); }
 function isAdmin() { return !!S.tree && (!S.tree.cloud || S.tree.role === 'admin'); }
 function saveMeta() { return DB.set('meta', S.meta); }
 let peopleTimer = 0, peopleDirty = null;
@@ -2537,7 +2540,7 @@ function cropRender(src, c, W, H) {
 function openPhoto(p, o) {
   o = o || {};
   if (!p || !p.photo) return null;
-  const t = S.tree, im = p.img || null, edit = !o.noEdit && !!im && canEdit() && S.people.has(p.id);
+  const t = S.tree, im = p.img || null, edit = !o.noEdit && !!im && S.people.has(p.id) && canEditPerson(S.people.get(p.id));
   let url = '', blob = null, natW = 0, natH = 0, base = 1, z = 1, tx = 0, ty = 0, cw = 0, ch = 0, dead = false, ro = null;
   const sh = Sheets.open({
     title: p.name || 'Ảnh chân dung', full: true, cls: 'pv',
@@ -3196,8 +3199,8 @@ function commit(put, del) {
   const cloud = !!(S.tree && S.tree.cloud && typeof Cloud !== 'undefined');
   /* thành viên (không có quyền sửa): chỉ ghi người mới thêm và các chỗ nối còn trống, phải tính trước khi đổi S.people */
   const member = cloud && !canEdit();
-  if (member && (del.length || !canAdd())) { toast('Bạn là thành viên nên chỉ thêm được người mới. Muốn sửa hay xóa, hãy gửi góp ý cho quản trị viên.', true); return Promise.resolve(); }
-  const ops = member ? Cloud.memberOps(put) : null;
+  if (member && (!canAdd() || del.some(function (id) { return !isMine(S.people.get(id)); }))) { toast('Bạn chỉ sửa, xóa được người do chính mình thêm. Với người khác, hãy gửi góp ý cho quản trị viên.', true); return Promise.resolve(); }
+  const ops = member ? Cloud.memberOps(put, del) : null;
   if (cloud && Cloud.user) for (const p of put) if (!S.people.has(p.id) && !p.by) p.by = Cloud.user.uid;
   const drops = [];                            // ảnh bị thay hoặc bỏ: xóa khỏi kho cho nhẹ
   for (const p of put) { const o = S.people.get(p.id); if (o && o.img && (!p.img || p.img.id !== o.img.id)) drops.push(o.img); }
@@ -3215,7 +3218,9 @@ function commit(put, del) {
 
 /* quản trị viên thấy người nào do thành viên nào thêm vào, để soát lại */
 function addedBy(p) {
-  if (!p.by || !S.tree || !S.tree.cloud || typeof Cloud === 'undefined' || !Cloud.cur || Cloud.cur.role !== 'admin' || !Cloud.user || p.by === Cloud.user.uid) return '';
+  if (!p.by || !S.tree || !S.tree.cloud || typeof Cloud === 'undefined' || !Cloud.cur || !Cloud.user) return '';
+  if (p.by === Cloud.user.uid) return Cloud.cur.role === 'viewer' ? html`${icon('user')}<div><div class="l">Người thêm vào cây</div><b>Bạn</b><div class="l">Bạn tự sửa, xóa được người này</div></div>` : '';
+  if (Cloud.cur.role !== 'admin') return '';
   const m = (Cloud.cur.members || []).find(function (x) { return x.uid === p.by; });
   return html`${icon('user')}<div><div class="l">Người thêm vào cây</div><b>${m ? m.name || m.email || 'Thành viên' : 'Thành viên đã rời cây'}</b></div>`;
 }
@@ -3242,7 +3247,7 @@ function openDetail(id) {
   const f = S.idx.father(p), m = S.idx.mother(p), sx = sexOf(p), gen = S.gen.get(id);
   const rel = S.idx.relativesOf(id);
   let total = 0; rel.forEach(function (l) { total += l.length; });
-  const edit = canEdit(), add = canAdd();
+  const edit = canEditPerson(p), add = canAdd();      // edit: sửa được người này (thành viên: người do mình thêm)
   const line = function (ic, label, v) { return v ? html`${icon(ic)}<div><div class="l">${label}</div><b>${v}</b></div>` : ''; };
   const groups = GP.GROUPS.filter(function (g) { return rel.has(g[0]); }).map(function (g) {
     const list = rel.get(g[0]), label = g[0] === 'cospouse' && sx === 'M' ? 'Chồng khác của vợ' : g[1];
@@ -3320,7 +3325,7 @@ function openDetail(id) {
           title: p.name,
           body: html`<div class="menu">
             <button data-act="branch">${icon('flag')}<span class="b"><span class="n">Xem cây từ người này</span><span class="s">Chỉ vẽ nhánh con cháu của ${firstName(p)}</span></span></button>
-            ${isAdmin() ? html`<button data-act="root">${icon('flag')}<span class="b"><span class="n">Đặt làm gốc chính của cây</span><span class="s">Số đời sẽ đếm từ người này</span></span></button>` : ''}
+            ${isAdmin() && canEdit() ? html`<button data-act="root">${icon('flag')}<span class="b"><span class="n">Đặt làm gốc chính của cây</span><span class="s">Số đời sẽ đếm từ người này</span></span></button>` : ''}
             <button data-act="del" style="color:var(--son)">${icon('trash')}<span class="b"><span class="n">Xóa người này</span><span class="s">Con cháu và vợ chồng vẫn được giữ lại</span></span></button></div>`,
           on: {
             branch: function () { Sheets.closeAll(); S.viewRoot = id === mainRoot() ? null : id; S.collapsed.clear(); setView('tree'); },
@@ -3633,11 +3638,11 @@ function autoSlash(input) {
 /* o: {id} sửa; {preset, parentOf, title} thêm; {declare:true, onSubmit} tờ kê khai của thành viên; {fromNote} admin duyệt tờ khai */
 function openForm(o) {
   o = o || {};
-  if (!o.declare && !(o.id ? canEdit() : canAdd())) {
-    toast(!S.tree ? 'Hãy tạo cây gia phả trước.' : o.id && canAdd() ? 'Bạn là thành viên nên chỉ thêm được người mới. Muốn sửa thông tin đã có, hãy bấm Góp ý sửa để gửi quản trị viên.' : 'Bạn chưa có quyền thêm người vào cây này.', true);
+  if (!o.declare && !(o.id ? canEditPerson(S.people.get(o.id)) : canAdd())) {
+    toast(!S.tree ? 'Hãy tạo cây gia phả trước.' : o.id && canAdd() ? 'Người này không do bạn thêm nên bạn chưa sửa được. Hãy bấm Góp ý sửa để gửi quản trị viên.' : 'Bạn chưa có quyền thêm người vào cây này.', true);
     if (!S.tree) newTree(); return;
   }
-  const member = !o.declare && !canEdit();          // thành viên: thêm người mới, chỉ nối vào chỗ còn trống
+  const member = !o.declare && !canEdit();          // thành viên: sửa người của mình, nối vào chỗ trống hoặc người của mình
   const old = o.id ? S.people.get(o.id) : null;
   const p = Object.assign(GP.blankPerson(), old || {}, o.preset || {});
   p.spouseIds = old ? S.idx.spouses(old.id).map(function (s) { return s.id; }) : (p.spouseIds || []).slice();
@@ -3889,8 +3894,8 @@ function openForm(o) {
     const removeKids = kids0.filter(function (k) { return st.kids.indexOf(k) < 0; });
     for (const k of addKids) {
       const why = GP.kidProblem(S.idx, np, k); if (why) return err(why);
-      const kk = S.people.get(k), slot = gender === 'F' ? 'motherId' : 'fatherId';
-      if (member && kk && kk[slot]) return err(kk.name + ' đã có ' + (slot === 'fatherId' ? 'bố' : 'mẹ') + ' trong cây. Thành viên chỉ nối được vào chỗ còn trống; muốn đổi, hãy gửi góp ý cho quản trị viên.');
+      const kk = S.people.get(k), slot = gender === 'F' ? 'motherId' : 'fatherId', cur = kk && kk[slot];
+      if (member && cur && cur !== np.id && !isMine(S.people.get(cur))) return err(kk.name + ' đã có ' + (slot === 'fatherId' ? 'bố' : 'mẹ') + ' trong cây. Thành viên chỉ nối được vào chỗ còn trống; muốn đổi, hãy gửi góp ý cho quản trị viên.');
     }
     const changed = GP.linkSave(S.people, np, { addKids: addKids, removeKids: removeKids, keepSpouses: member });
     Sheets.closeAll();
@@ -4147,7 +4152,7 @@ function openHelp() {
       <li><b>Điền nhanh bằng căn cước.</b> Trong màn hình nhập có nút Quét QR căn cước và Đọc ảnh căn cước. Mã QR cho kết quả chính xác; đọc chữ từ ảnh cần soát lại.</li>
       <li><b>Xem quan hệ.</b> Bấm vào một người để thấy ai là ông bà nội ngoại, bác, chú, cô, cậu, dì, anh chị em họ, con, cháu của người đó. Thẻ “Quan hệ” cho biết hai người bất kỳ gọi nhau là gì.</li>
       <li><b>Ảnh chân dung.</b> Ở màn Sửa bấm Chụp ảnh hoặc Chọn ảnh, rồi kéo, chụm hai ngón cho khuôn mặt nằm gọn trong khung. Ảnh được nén gọn để lưu; bấm vào ảnh trên trang của người đó để xem cả tấm và phóng to.</li>
-      <li><b>Dùng chung với họ hàng.</b> Người được mời vào cây là <b>thành viên</b>: xem cây, thêm người mới và gửi góp ý, không sửa được thông tin đã có. Quản trị viên vào Thành viên, bấm Cho cùng quản trị để ai đó sửa cây cùng mình, bấm Thôi cùng quản trị để rút lại.</li>
+      <li><b>Dùng chung với họ hàng.</b> Người được mời vào cây là <b>thành viên</b>: xem cây, thêm người mới, tự sửa và xóa người do chính mình thêm (mới sinh, mới mất…), còn người khác thêm thì gửi góp ý. Quản trị viên vào Thành viên, bấm Cho cùng quản trị để ai đó sửa cây cùng mình, bấm Thôi cùng quản trị để rút lại.</li>
       <li><b>Sao lưu.</b> Vào Thêm, chọn “Sao lưu cây này ra tệp” mỗi khi nhập xong một đợt.</li></ol>
       <div class="hint">${icon('info')}<span>Trên cây: kéo để di chuyển, chụm hai ngón để phóng to thu nhỏ. Nút tròn nhỏ dưới mỗi người dùng để gập hoặc mở nhánh con cháu. Khung ảnh vuông là nam, tròn là nữ. Vạch đỏ nối vợ chồng.</span></div>`
   });
@@ -4261,24 +4266,32 @@ service cloud.firestore {
     function member(t) { return get(memberPath(t)).data; }
     function approved(t) { return exists(memberPath(t)) && member(t).get('status', '') == 'approved'; }
     function invited(t) { return hasEmail() && exists(invitePath(t)); }
-    // quản trị viên (chủ cây) và người cùng quản trị sửa được mọi thứ; thành viên đã duyệt chỉ thêm người mới
+    // quản trị viên (chủ cây) và người cùng quản trị sửa được mọi thứ;
+    // thành viên đã duyệt: thêm người mới, sửa / xóa người do chính mình thêm (trường by), người khác thì chỉ nối thêm
     function canEdit(t) { return isOwner(t) || (signedIn() && approved(t) && member(t).get('role', '') == 'editor'); }
     function canAdd(t) { return canEdit(t) || (signedIn() && approved(t)); }
     function canView(t) { return isOwner(t) || (signedIn() && (tree(t).get('open', false) == true || approved(t))); }
     function personPath(t, p) { return /databases/$(database)/documents/trees/$(t)/people/$(p); }
-    // người chính mình vừa thêm trong cùng lần ghi này
-    function newByMe(t, p) { return p is string && p != '' && !exists(personPath(t, p)) && getAfter(personPath(t, p)).data.get('by', '') == me(); }
-    // thành viên sửa người đã có: chỉ được nối người mới thêm vào chỗ còn trống (thêm vợ/chồng mới, điền bố/mẹ còn thiếu)
+    // người do chính mình thêm: trước lần ghi này / sau lần ghi này (kể cả người vừa thêm trong cùng lần ghi)
+    function mineBefore(t, p) { return p is string && p != '' && exists(personPath(t, p)) && get(personPath(t, p)).data.get('by', '') == me(); }
+    function mineAfter(t, p) { return p is string && p != '' && existsAfter(personPath(t, p)) && getAfter(personPath(t, p)).data.get('by', '') == me(); }
+    function myDoc() { return resource.data.get('by', '') == me() && request.resource.data.get('by', '') == me(); }
+    // ô bố/mẹ của người khác: chỉ đổi giữa trống và người của mình
+    function slotOk(t, x, y) { return (x == '' || mineBefore(t, x)) && (y == '' || mineAfter(t, y)); }
+    // thành viên ghi vào người không phải của mình: chỉ nối thêm hoặc gỡ một người của mình, không đổi thứ tự vợ chồng, không sửa gì khác
     function linkOnly(t) {
       let o = resource.data;
       let d = request.resource.data;
       let k = d.diff(o).affectedKeys();
       let a = o.get('spouseIds', []);
       let b = d.get('spouseIds', []);
+      let add = b.removeAll(a);
+      let rem = a.removeAll(b);
       return k.hasOnly(['spouseIds', 'fatherId', 'motherId', 'u'])
-        && (!('fatherId' in k) || (o.get('fatherId', '') == '' && newByMe(t, d.fatherId)))
-        && (!('motherId' in k) || (o.get('motherId', '') == '' && newByMe(t, d.motherId)))
-        && (!('spouseIds' in k) || (b.size() == a.size() + 1 && b[0:a.size()] == a && newByMe(t, b[a.size()])));
+        && (!('fatherId' in k) || slotOk(t, o.get('fatherId', ''), d.get('fatherId', '')))
+        && (!('motherId' in k) || slotOk(t, o.get('motherId', ''), d.get('motherId', '')))
+        && (!('spouseIds' in k) || (add.size() <= 1 && rem.size() <= 1 && b.removeAll(add) == a.removeAll(rem)
+            && (add.size() == 0 || mineAfter(t, add[0])) && (rem.size() == 0 || mineBefore(t, rem[0]))));
     }
 
     match /users/{u} {
@@ -4295,8 +4308,8 @@ service cloud.firestore {
       match /people/{p} {
         allow read: if canView(t);
         allow create: if canEdit(t) || (canAdd(t) && request.resource.data.get('by', '') == me());
-        allow update: if canEdit(t) || (canAdd(t) && linkOnly(t));
-        allow delete: if canEdit(t);
+        allow update: if canEdit(t) || (canAdd(t) && (myDoc() || linkOnly(t)));
+        allow delete: if canEdit(t) || (canAdd(t) && resource.data.get('by', '') == me());
       }
       match /members/{m} {
         allow read: if isOwner(t) || (signedIn() && me() == m);
@@ -4316,16 +4329,15 @@ service cloud.firestore {
         allow update, delete: if canEdit(t);
       }
       // ảnh: một tài liệu mô tả và dữ liệu ảnh (mảnh dưới 1 MB). Ai xem được cây thì xem được;
-      // người sửa được cây thì thêm, xóa được; thành viên chỉ thêm ảnh cho người mới do mình thêm
+      // người sửa được cây thì thêm, xóa được; thành viên thêm, thay, xóa ảnh do chính mình tải lên
       match /photos/{f} {
         allow read: if canView(t);
         allow create: if canEdit(t) || (canAdd(t) && request.resource.data.get('by', '') == me());
-        allow update: if canEdit(t) || (canAdd(t) && resource.data.get('by', '') == me() && request.resource.data.get('by', '') == me());
-        allow delete: if canEdit(t);
+        allow update: if canEdit(t) || (canAdd(t) && myDoc());
+        allow delete: if canEdit(t) || (canAdd(t) && resource.data.get('by', '') == me());
         match /c/{i} {
           allow read: if canView(t);
-          allow create, update: if canEdit(t) || (canAdd(t) && get(/databases/$(database)/documents/trees/$(t)/photos/$(f)).data.get('by', '') == me());
-          allow delete: if canEdit(t);
+          allow write: if canEdit(t) || (canAdd(t) && get(/databases/$(database)/documents/trees/$(t)/photos/$(f)).data.get('by', '') == me());
         }
       }
     }
@@ -4623,34 +4635,39 @@ const Cloud = {
     Promise.all(jobs).catch(function (e) { toast('Máy chủ từ chối lưu: ' + self.errText(e), true); });
     return Promise.resolve();
   },
-  /* Thành viên: tách phần được phép ghi. Người mới thì ghi cả hồ sơ (kèm người thêm); người đã có thì chỉ ghi
-     vợ/chồng mới thêm và bố/mẹ đang trống, đúng như bộ quy tắc cho phép. Gọi trước khi đổi S.people. */
-  memberOps: function (put) {
-    const uid = this.user ? this.user.uid : '', self = this;
-    return put.map(function (p) {
+  /* Thành viên: tách phần được phép ghi, đúng như bộ quy tắc cho phép. Người mới và người của mình thì ghi cả hồ sơ
+     (kèm người thêm); người của người khác thì chỉ ghi phần nối: thêm / gỡ vợ chồng (arrayUnion / arrayRemove, giữ nguyên
+     thứ tự), ô bố / mẹ. Xóa: chỉ người của mình. Gọi trước khi đổi S.people. */
+  memberOps: function (put, del) {
+    const uid = this.user ? this.user.uid : '', self = this, ops = [];
+    put.forEach(function (p) {
       const o = S.people.get(p.id);
-      if (!o) return { kind: 'new', id: p.id, doc: self.toDoc(Object.assign({}, p, { by: uid })) };
-      const add = (p.spouseIds || []).filter(function (x) { return (o.spouseIds || []).indexOf(x) < 0; });
-      return {
-        kind: 'link', id: p.id, add: add, u: p.u || Date.now(),
-        fa: !o.fatherId && p.fatherId ? p.fatherId : '', mo: !o.motherId && p.motherId ? p.motherId : ''
-      };
-    }).filter(function (op) { return op.kind === 'new' || op.add.length || op.fa || op.mo; });
+      if (!o || o.by === uid) { ops.push({ kind: 'set', id: p.id, doc: self.toDoc(Object.assign({}, p, { by: uid })) }); return; }
+      const a = o.spouseIds || [], b = p.spouseIds || [];
+      const op = { kind: 'link', id: p.id, u: p.u || Date.now(), add: b.filter(function (x) { return a.indexOf(x) < 0; }), rem: a.filter(function (x) { return b.indexOf(x) < 0; }) };
+      if ((p.fatherId || '') !== (o.fatherId || '')) op.fa = p.fatherId || '';
+      if ((p.motherId || '') !== (o.motherId || '')) op.mo = p.motherId || '';
+      if (op.add.length || op.rem.length || 'fa' in op || 'mo' in op) ops.push(op);
+    });
+    (del || []).forEach(function (id) { ops.push({ kind: 'del', id: id }); });
+    return ops;
   },
   writeMember: function (id, ops) {
     if (!this.live(id)) return Promise.reject(new Error('chưa kết nối'));
     const F = this.fb.F, db = this.fb.db, self = this, b = F.writeBatch(db);
     ops.forEach(function (op) {
       const ref = F.doc(db, 'trees', id, 'people', op.id);
-      if (op.kind === 'new') { b.set(ref, op.doc); return; }
+      if (op.kind === 'set') { b.set(ref, op.doc); return; }
+      if (op.kind === 'del') { b.delete(ref); return; }
       const patch = { u: op.u };
       if (op.add.length) patch.spouseIds = F.arrayUnion.apply(null, op.add);
-      if (op.fa) patch.fatherId = op.fa;
-      if (op.mo) patch.motherId = op.mo;
+      else if (op.rem.length) patch.spouseIds = F.arrayRemove.apply(null, op.rem);
+      if ('fa' in op) patch.fatherId = op.fa;
+      if ('mo' in op) patch.motherId = op.mo;
       b.update(ref, patch);
     });
     b.commit().catch(function (e) {
-      toast(e && e.code === 'permission-denied' ? 'Máy chủ chưa cho thành viên thêm người. Quản trị viên cần dán lại bộ quy tắc mới trong hướng dẫn (bước 14).' : 'Máy chủ từ chối lưu: ' + self.errText(e), true);
+      toast(e && e.code === 'permission-denied' ? 'Máy chủ chưa cho lưu. Nếu bạn vừa thêm hay sửa người của mình, quản trị viên cần dán lại bộ quy tắc mới trong hướng dẫn (bước 14).' : 'Máy chủ từ chối lưu: ' + self.errText(e), true);
     });
     return Promise.resolve();
   },
@@ -4663,7 +4680,7 @@ const Cloud = {
     const t = S.tree, self = this;
     if (!t || t.cloud) return;
     if (this.state !== 'ready' || !this.user) { toast('Hãy đăng nhập bằng Google trước.', true); return; }
-    confirmBox({ title: 'Đưa cây lên mạng?', text: 'Cây “' + t.name + '” (' + S.people.size + ' người) sẽ được lưu vào kho Firebase của bạn để dùng trên nhiều máy và mời người trong họ cùng xem.', more: 'Bạn là quản trị viên. Người khác vào được sau khi bạn duyệt: xem cây, thêm người mới và góp ý; muốn ai cùng sửa thì bạn cho cùng quản trị.', ok: 'Đưa lên mạng' }).then(function (yes) {
+    confirmBox({ title: 'Đưa cây lên mạng?', text: 'Cây “' + t.name + '” (' + S.people.size + ' người) sẽ được lưu vào kho Firebase của bạn để dùng trên nhiều máy và mời người trong họ cùng xem.', more: 'Bạn là quản trị viên. Người khác vào được sau khi bạn duyệt: xem cây, thêm người mới, sửa người do chính họ thêm và góp ý; muốn ai cùng sửa cả cây thì bạn cho cùng quản trị.', ok: 'Đưa lên mạng' }).then(function (yes) {
       if (!yes) return;
       const F = self.fb.F, db = self.fb.db, now = Date.now();
       toast('Đang đưa lên mạng…');
@@ -4905,7 +4922,7 @@ const Cloud = {
           <div class="btns"><button class="btn pri" data-act="share">${icon('share')}Gửi link</button><button class="btn" data-act="copy">${icon('copy')}Sao chép link</button></div>
           <div class="sec">Không vào được bằng link?</div>
           <button class="btn block" data-act="byEmail">${icon('user')}Thêm thành viên bằng email</button>
-          <div class="hint">${icon('info')}<span>Người nhận vào làm thành viên: xem cây, thêm người mới và gửi góp ý, không sửa được thông tin đã có. Muốn cho ai cùng sửa, vào Thành viên chọn Cho cùng quản trị. Bấm link ngay trong Zalo sẽ mở trình duyệt riêng của Zalo, nơi Google không cho đăng nhập; trang sẽ chỉ họ mở sang Chrome hoặc Safari mà vẫn giữ nguyên lời mời.</span></div>`,
+          <div class="hint">${icon('info')}<span>Người nhận vào làm thành viên: xem cây, thêm người mới, tự sửa người do mình thêm và gửi góp ý; không sửa được người khác thêm. Muốn cho ai cùng sửa cả cây, vào Thành viên chọn Cho cùng quản trị. Bấm link ngay trong Zalo sẽ mở trình duyệt riêng của Zalo, nơi Google không cho đăng nhập; trang sẽ chỉ họ mở sang Chrome hoặc Safari mà vẫn giữ nguyên lời mời.</span></div>`,
         on: {
           share: function () { shareText('Gia phả ' + t.name, text); },
           copy: function () { copyText(link); },
@@ -5071,7 +5088,7 @@ const Cloud = {
       setHTML(box, html`<div class="seg" style="margin-bottom:14px"><label><input type="radio" name="ibt" ${view === 'notes' ? raw('checked') : ''} data-act="tab" data-v="notes"><span>Góp ý${fresh.length ? ' (' + fresh.length + ')' : ''}</span></label>${admin ? html`<label><input type="radio" name="ibt" ${view === 'mem' ? raw('checked') : ''} data-act="tab" data-v="mem"><span>Thành viên${pend.length ? ' (' + pend.length + ')' : ''}</span></label>` : ''}</div>
         ${view === 'notes' ? (cur.notes.length ? cur.notes.map(function (n) { return noteHTML(n, false); }) : html`<p class="muted center" style="padding:24px 0">Chưa có góp ý hay tờ khai nào.</p>`)
           : html`${pend.length ? html`<div class="sec" style="margin-top:0">Đang chờ duyệt (${pend.length})</div>${pend.map(memRow)}<div style="height:18px"></div>` : ''}
-            <div class="hint" style="margin:0 0 12px">${icon('info')}<span><b>Thành viên</b> xem cây, thêm được người mới (con, vợ chồng, bố mẹ còn thiếu) và gửi góp ý, nhưng không sửa hay xóa được thông tin đã có. <b>Cùng quản trị</b> thì sửa, xóa được như bạn và đọc được góp ý. Bấm Thôi cùng quản trị là người đó trở lại làm thành viên.</span></div>
+            <div class="hint" style="margin:0 0 12px">${icon('info')}<span><b>Thành viên</b> xem cây, thêm được người mới, tự sửa và xóa những người do chính mình thêm (ví dụ báo mới mất, mới sinh). Người do người khác thêm thì thành viên chỉ gửi góp ý được. <b>Cùng quản trị</b> thì sửa, xóa được mọi người như bạn và đọc được góp ý. Bấm Thôi cùng quản trị là người đó trở lại làm thành viên.</span></div>
             ${invCard()}
             <label class="chk card" style="margin-bottom:12px"><input type="checkbox" data-act="open" ${t.open ? raw('checked') : ''}><span>Ai có link và đã đăng nhập đều xem được, không cần duyệt</span></label>
             <button class="btn block" data-act="share" style="margin-bottom:12px">${icon('share')}Gửi link, mã QR mời</button>
@@ -5353,7 +5370,7 @@ function openGio() {
       none: function () { Gio.setSel(t.id, new Set()); draw(); },
       pick: function (b) { const s = Gio.selSet(t.id); if (b.checked) s.add(b.dataset.id); else s.delete(b.dataset.id); Gio.setSel(t.id, s); draw(); },
       open: function (b) { openDetail(b.dataset.id); },
-      fix: function (b) { if (canEdit()) openForm({ id: b.dataset.id }); else openDetail(b.dataset.id); }
+      fix: function (b) { if (canEditPerson(S.people.get(b.dataset.id))) openForm({ id: b.dataset.id }); else openDetail(b.dataset.id); }
     },
     onClose: function () { Gio.redraw = null; }
   });
@@ -5396,7 +5413,7 @@ function openGio() {
       <div class="sec">Giỗ sắp tới<small>${withDate.length} người</small></div>
       ${withDate.length ? withDate.map(row) : html`<p class="muted">Chưa có ai trong cây có ngày giỗ. Nhập ngày mất (dương lịch) hoặc ngày giỗ âm lịch cho người đã mất.</p>`}
       ${noDate.length ? html`<div class="sec">Chưa có ngày giỗ<small>${noDate.length} người</small></div>
-        ${noDate.map(function (p) { return html`<button class="row flat" data-act="fix" data-id="${p.id}">${av(p)}<span class="b"><span class="n">${p.name}</span><span class="s">${GP.fmtDate(p.death) ? 'Mất ' + GP.fmtDate(p.death) + ', cần đủ ngày tháng' : 'Chưa có ngày mất'}${canEdit() ? '. Bấm để thêm' : ''}</span></span></button>`; })}` : ''}`);
+        ${noDate.map(function (p) { return html`<button class="row flat" data-act="fix" data-id="${p.id}">${av(p)}<span class="b"><span class="n">${p.name}</span><span class="s">${GP.fmtDate(p.death) ? 'Mất ' + GP.fmtDate(p.death) + ', cần đủ ngày tháng' : 'Chưa có ngày mất'}${canEditPerson(p) ? '. Bấm để thêm' : ''}</span></span></button>`; })}` : ''}`);
     const hs = $('#gHour', box);
     if (hs) hs.addEventListener('change', function () { g.hour = +hs.value; saveMeta(); Gio.sync(); });
   };
